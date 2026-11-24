@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "concurrently -n API,UI -c green,cyan \"npm --prefix crypto-portfolio-backend run dev\" \"npm --prefix crypto-portfolio-frontend run dev\""
+    "dev": "concurrently -n API,UI -c green,cyan \"npm --prefix crypto-portfolio-backend run dev\" \"npm --prefix crypto-portfolio-frontend run dev\"",
+    "build": "npm --prefix crypto-portfolio-frontend install && npm --prefix crypto-portfolio-frontend run build"
   },
   "devDependencies": {
     "concurrently": "^9.0.0"
