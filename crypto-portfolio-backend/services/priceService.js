@@ -1,72 +1,82 @@
 const axios = require('axios');
-const Transaction = require('../models/Transaction');
+const PriceCache = require('../models/PriceCache');
 
-const COINGECKO_BASE_URL = 'https://api.coingecko.com/api/v3';
+const DEFAULT_COINS = [
+  'bitcoin',
+  'ethereum',
+  'solana',
+  'binancecoin',
+  'cardano',
+  'ripple',
+  'dogecoin',
+  'polkadot',
+  'chainlink',
+  'litecoin',
+];
 
-// In-memory cache storing { coinId: usdPrice }
-let priceCache = {};
-let lastUpdated = null;
-
-/**
- * Fetches live USD prices for all distinct coins present in the Transaction ledger
- * (plus baseline majors) and updates the in-memory priceCache.
- */
-const refreshLivePrices = async () => {
+const refreshLivePrices = async (coinIds = DEFAULT_COINS, vsCurrencies = 'usd') => {
   try {
-    // Get every unique coinId across all portfolios
-    const activeCoinIds = await Transaction.distinct('coinId');
+    const idsParam = Array.isArray(coinIds) ? coinIds.join(',') : coinIds;
+    const url = 'https://api.coingecko.com/api/v3/simple/price';
 
-    // Always include a few baseline coins so cache is never empty on fresh installs
-    const baselineCoins = ['bitcoin', 'ethereum', 'solana'];
-    const allCoins = [...new Set([...baselineCoins, ...activeCoinIds])];
+    const headers = {};
+    if (process.env.COINGECKO_API_KEY) {
+      headers['x-cg-demo-api-key'] = process.env.COINGECKO_API_KEY;
+    }
 
-    if (allCoins.length === 0) return priceCache;
-
-    const idsParam = allCoins.join(',');
-    const response = await axios.get(`${COINGECKO_BASE_URL}/simple/price`, {
+    const { data } = await axios.get(url, {
       params: {
         ids: idsParam,
-        vs_currencies: 'usd',
+        vs_currencies: vsCurrencies,
+        include_24hr_change: true,
       },
+      headers,
       timeout: 10000,
     });
 
-    // Update cache cleanly (preserving stale prices if a single coin omits data)
-    for (const [coinId, priceObj] of Object.entries(response.data)) {
-      if (priceObj && typeof priceObj.usd === 'number') {
-        priceCache[coinId.toLowerCase()] = priceObj.usd;
-      }
+    const now = new Date();
+    const ops = Object.entries(data).map(([coinId, marketData]) => ({
+      updateOne: {
+        filter: { coinId },
+        update: {
+          $set: {
+            coinId,
+            priceUsd: marketData.usd,
+            change24h: marketData.usd_24h_change ?? 0,
+            updatedAt: now,
+          },
+        },
+        upsert: true,
+      },
+    }));
+
+    if (ops.length > 0) {
+      await PriceCache.bulkWrite(ops);
     }
 
-    lastUpdated = new Date();
-    console.log(
-      `[PriceCache] Updated ${Object.keys(priceCache).length} coins at ${lastUpdated.toLocaleTimeString()}`
-    );
-
-    return priceCache;
+    return data;
   } catch (error) {
-    console.error(`[PriceCache Error] Failed to fetch from CoinGecko: ${error.message}`);
-    return priceCache; // Gracefully fall back to last known cached prices
+    const status = error.response?.status;
+    console.warn(
+      `[PriceCache Warning] CoinGecko refresh skipped (${status || error.message}). Using cached prices.`
+    );
+    return null;
   }
 };
 
-/**
- * Returns cached prices immediately; if a newly added coin isn't in cache yet,
- * triggers a targeted fetch so new transactions show live prices immediately.
- */
-const getLivePrices = async (requiredCoinIds = []) => {
-  const missingCoins = requiredCoinIds.filter(
-    (id) => priceCache[id.toLowerCase()] === undefined
-  );
+const getLivePrices = async () => {
+  const cachedDocs = await PriceCache.find({});
+  const prices = {};
 
-  if (Object.keys(priceCache).length === 0 || missingCoins.length > 0) {
-    await refreshLivePrices();
+  for (const doc of cachedDocs) {
+    prices[doc.coinId] = {
+      usd: doc.priceUsd,
+      usd_24h_change: doc.change24h ?? 0,
+      updatedAt: doc.updatedAt,
+    };
   }
 
-  return {
-    prices: priceCache,
-    lastUpdated,
-  };
+  return { prices, raw: cachedDocs };
 };
 
 module.exports = {
